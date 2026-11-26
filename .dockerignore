@@ -1,0 +1,9 @@
+.git
+.gradle
+.idea
+.vscode
+.gemini
+.claude
+.codex
+build
+*.iml
