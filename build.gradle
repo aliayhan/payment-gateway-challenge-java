@@ -1,7 +1,13 @@
 plugins {
     id 'java'
+    id 'jacoco'
     id 'org.springframework.boot' version '3.1.5'
     id 'io.spring.dependency-management' version '1.0.15.RELEASE'
+    id 'info.solidsoft.pitest' version '1.15.0'
+}
+
+jacoco {
+    toolVersion = '0.8.11'
 }
 
 group = 'com.checkout'
@@ -15,13 +21,156 @@ repositories {
     mavenCentral()
 }
 
+sourceSets {
+    integrationTest {
+        java.srcDirs = ['src/integrationTest/java']
+        resources.srcDirs = ['src/integrationTest/resources']
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+    componentTest {
+        java.srcDirs = ['src/componentTest/java']
+        resources.srcDirs = ['src/componentTest/resources']
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+    componentTestImplementation.extendsFrom testImplementation
+    componentTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.2.0'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+    componentTestImplementation 'io.cucumber:cucumber-java:7.18.1'
+    componentTestImplementation 'io.cucumber:cucumber-junit-platform-engine:7.18.1'
+    componentTestImplementation 'org.junit.platform:junit-platform-suite'
+    componentTestImplementation 'org.testcontainers:testcontainers:1.21.0'
 }
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+tasks.register('unit-test', Test) {
+    description = 'Runs only pure unit tests (repository, validation, and service).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+tasks.register('integration-test', Test) {
+    description = 'Runs integration tests (HTTP bank client and Spring MockMvc controller).'
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter tasks.named('test')
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+tasks.register('component-test', Test) {
+    description = 'Runs Cucumber component tests against containerized gateway and bank simulator.'
+    group = 'verification'
+    testClassesDirs = sourceSets.componentTest.output.classesDirs
+    classpath = sourceSets.componentTest.runtimeClasspath
+    useJUnitPlatform()
+    systemProperty 'cucumber.junit-platform.naming-strategy', 'long'
+    mustRunAfter tasks.named('test'), tasks.named('integration-test')
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+def jacocoExclusions = [
+    'com/checkout/payment/gateway/PaymentGatewayApplication.class',
+    'com/checkout/payment/gateway/configuration/ApplicationConfiguration.class',
+    'com/checkout/payment/gateway/configuration/BankClientProperties.class',
+    'com/checkout/payment/gateway/model/Payment.class',
+    'com/checkout/payment/gateway/client/api/BankPaymentResponse.class',
+    'com/checkout/payment/gateway/model/enums/**',
+    'com/checkout/payment/gateway/client/BankPaymentDecision.class',
+    'com/checkout/payment/gateway/validation/PaymentRequestError.class',
+    'com/checkout/payment/gateway/model/exception/**'
+]
+
+def jacocoFilteredClasses = files(sourceSets.main.output.classesDirs.files.collect {
+    fileTree(dir: it, exclude: jacocoExclusions)
+})
+
+tasks.named('jacocoTestReport', JacocoReport) {
+    dependsOn tasks.named('test'), tasks.named('integration-test')
+    executionData.setFrom(files(
+        layout.buildDirectory.file('jacoco/test.exec'),
+        layout.buildDirectory.file('jacoco/integration-test.exec')
+    ))
+    classDirectories.setFrom(jacocoFilteredClasses)
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = true
+    }
+}
+
+tasks.named('jacocoTestCoverageVerification', JacocoCoverageVerification) {
+    dependsOn tasks.named('jacocoTestReport')
+    executionData.setFrom(files(
+        layout.buildDirectory.file('jacoco/test.exec'),
+        layout.buildDirectory.file('jacoco/integration-test.exec')
+    ))
+    classDirectories.setFrom(jacocoFilteredClasses)
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.90
+            }
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integration-test'), tasks.named('jacocoTestCoverageVerification'), tasks.named('mutation-test')
+}
+
+pitest {
+    junit5PluginVersion = '1.2.1'
+    testSourceSets = [sourceSets.test, sourceSets.integrationTest]
+    targetClasses = [
+        'com.checkout.payment.gateway.validation.*',
+        'com.checkout.payment.gateway.service.*',
+        'com.checkout.payment.gateway.client.*'
+    ]
+    targetTests = ['com.checkout.payment.gateway.*']
+    outputFormats = ['HTML', 'XML']
+    timestampedReports = false
+    threads = 4
+    mutationThreshold = 90
+    coverageThreshold = 90
+}
+
+tasks.register('mutation-test') {
+    description = 'Runs PITest mutation testing on validation, service, and bank-client logic.'
+    group = 'verification'
+    dependsOn tasks.named('pitest')
+}
+
+tasks.register('test-all') {
+    description = 'Runs all test suites and quality gates: unit tests, integration tests, JaCoCo, PITest, and Docker Cucumber component tests.'
+    group = 'verification'
+    dependsOn tasks.named('check'), tasks.named('component-test')
 }

@@ -35,3 +35,11 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### AI Assistants ###
+.gemini/
+.claude/
+.codex/
+
+### OS ###
+.DS_Store
